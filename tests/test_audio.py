@@ -1,9 +1,11 @@
 import shutil
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from wavetag.audio.optout_code import AudioOptOutConfig, detect_optout, embed_optout
+from wavetag.audio.pipeline import ProtectResult, WaveTagAudioPipeline
 from wavetag.audio.volto_plus import apply_volto_plus, detect_volto_plus
 from wavetag.audio.volto_removal import RemovalConfig, lateral_crop_aco, longitudinal_crop
 from wavetag.common.payload import pack_optout
@@ -65,3 +67,22 @@ def test_removal_reduces_similarity(speech_like):
     assert len(x2) == len(x)
     assert float(cosine(_dummy_embed(x2)[0], ref)[0]) <= 1.0
     assert info["removed_units"] >= 1
+
+
+def test_pipeline_preserves_original_when_protection_fails(speech_like, monkeypatch):
+    pipeline = object.__new__(WaveTagAudioPipeline)
+    pipeline.cfg = SimpleNamespace(strength_levels=["strong"])
+    failed = ProtectResult(
+        audio=np.zeros_like(speech_like),
+        passed=False,
+        strength="strong",
+        metrics={"sim_aux": 0.8, "quality_ok": False},
+    )
+    monkeypatch.setattr(pipeline, "protect_once", lambda *_: failed)
+
+    result = pipeline.protect(speech_like, uid=1)
+
+    np.testing.assert_array_equal(result.audio, speech_like)
+    assert result.audio is not speech_like
+    assert not result.passed
+    assert result.info["fallback"] == "original_audio"

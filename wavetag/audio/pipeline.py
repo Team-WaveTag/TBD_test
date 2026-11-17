@@ -83,6 +83,7 @@ class WaveTagAudioPipeline:
 
     # ---------------------------------------------------------------- 재처리 루프 (도면 ④-재처리)
     def protect(self, x: np.ndarray, uid: int, strength: str = "strong", max_retries: int = 2) -> ProtectResult:
+        """보호 성공 결과를 반환하고, 모든 시도가 실패하면 원본 오디오를 반환한다."""
         levels = list(self.cfg.strength_levels)
         idx = levels.index(strength)
         tried, best = set(), None
@@ -99,4 +100,10 @@ class WaveTagAudioPipeline:
             if nxt < 0 or nxt >= len(levels) or nxt in tried:
                 break
             idx = nxt
-        return best
+        return ProtectResult(
+            audio=x.copy(),
+            passed=False,
+            strength=best.strength,
+            metrics=best.metrics,
+            info={**best.info, "fallback": "original_audio"},
+        )
