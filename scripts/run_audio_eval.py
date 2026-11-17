@@ -10,7 +10,7 @@
   sim_<인코더>     : 원본과의 화자 유사도(낮을수록 보호 유지). eval 인코더는 생성에 쓰지 않은 모델 -> 블랙박스
   pesq / snr_db    : 원본 대비 음질 (공격 포함 총 열화)
   optout_ok/ber    : 옵트아웃 코드 복원 여부 / ECC 전 비트오류율
-  trigger_ratio    : Volto+ 트리거 검출 피크비 (wm_mode=plus)   [데이터 수준 지표 - 모델 수준 검증은 train_sr_and_verify.py]
+  trigger_ratio / star_correlation : 소유권 워터마크 검출 점수 (합격 판정에도 사용)
 ※ 화자 유사도는 '데이터 수준 대리 지표'이다. 논문의 최종 성능(학습 방해)은 모델 학습 후 정확도로 측정한다.
 """
 from __future__ import annotations
@@ -98,13 +98,23 @@ def main():
             for n, e in evals.items():
                 row[f"sim_{n}"] = float(cosine(e.embed(ya[None])[0], ref_embs[n])[0])
             d = detect_optout(ya, pipe.optout_cfg, 5, payload)
-            row.update(optout_ok=int(d["ok"]), optout_raw_ber=d["raw_ber"])
+            row.update(optout_ok=int(d["ok"] and d["payload"] == payload),
+                       optout_raw_ber=d["raw_ber"])
             if cfg.audio.wm_mode == "plus":
                 vp = cfg.audio.volto_plus
                 td = detect_volto_plus(ya, args.uid, sr, vp.slot_ms, vp.seed_base)
                 row["trigger_ratio"] = td["peak_ratio"]
                 row["trigger_detected"] = int(td["peak_ratio"] >= cfg.audio.trigger_detect.min_peak_ratio
-                                              and abs(td["loc_error"]) <= 16)
+                                              and abs(td["loc_error"])
+                                              <= cfg.audio.trigger_detect.max_loc_error_samples)
+            else:
+                from wavetag.audio.volto_star import star_detect
+
+                vs = cfg.audio.volto_star
+                score = star_detect(pipe.star_model, ya, args.uid, sr, int(vs.seg_sec * sr),
+                                    cfg.audio.volto_plus.slot_ms, cfg.audio.volto_plus.seed_base, device)
+                row["star_correlation"] = score
+                row["star_detected"] = int(score >= vs.min_correlation)
             rows.append(row)
 
     df = pd.DataFrame(rows)
