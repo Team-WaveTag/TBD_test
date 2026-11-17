@@ -55,6 +55,7 @@ audio:
   volto_star:
     ckpt: null                # 학습된 체크포인트 경로 (scripts/train_volto_star.py 결과)
     seg_sec: 3.0
+    min_correlation: 0.1      # ★TBD★ Volto* 검출 상관 임계
     base: 16
     depth: 4
     delta_scale: 0.05         # ★TBD★
@@ -70,7 +71,8 @@ audio:
     max_shift: 2048
     local_refine: 16
   trigger_detect:
-    min_peak_ratio: 8.0       # ★TBD★ Volto+ 트리거 '검출' 판정 임계 (무삽입 파일 분포로 확정)
+    min_peak_ratio: 8.0       # ★TBD★ Volto+ 트리거 검출 임계 (무삽입 파일 분포로 확정)
+    max_loc_error_samples: 16 # Volto+ 트리거 위치 허용 오차
 
 # ---- 이미지 ------------------------------------------------------------------
 image:

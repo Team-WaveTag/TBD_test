@@ -4,13 +4,13 @@
   python scripts/run_audio_eval.py --data_dir data/audio --out_dir results/audio --n_files 5 --uid 1001
   python scripts/run_audio_eval.py --data_dir data/audio --attacks identity,mp3_128k,resample_8k --strength strong
 
-출력: results/audio/per_file.csv (파일×공격 단위 원자료), summary.csv (공격별 평균), protected/*.wav, certificates/*.json
+출력: results/audio/per_file.csv (파일×공격 단위 원자료), summary.csv (공격별 평균), protected/*.wav, 합격 파일의 certificates/*.json
 
 측정 항목(공격 적용 후 파일 기준)
   sim_<인코더>     : 원본과의 화자 유사도(낮을수록 보호 유지). eval 인코더는 생성에 쓰지 않은 모델 -> 블랙박스
   pesq / snr_db    : 원본 대비 음질 (공격 포함 총 열화)
   optout_ok/ber    : 옵트아웃 코드 복원 여부 / ECC 전 비트오류율
-  trigger_ratio    : Volto+ 트리거 검출 피크비 (wm_mode=plus)   [데이터 수준 지표 - 모델 수준 검증은 train_sr_and_verify.py]
+  trigger_ratio / star_correlation : 소유권 워터마크 검출 점수 (합격 판정에도 사용)
 ※ 화자 유사도는 '데이터 수준 대리 지표'이다. 논문의 최종 성능(학습 방해)은 모델 학습 후 정확도로 측정한다.
 """
 from __future__ import annotations
@@ -77,9 +77,13 @@ def main():
         wav_path = out / "protected" / f"{f.stem}_wavetag.wav"
         save_audio(wav_path, res.audio, sr)
         y = load_audio(wav_path, sr)
-        (out / "certificates" / f"{f.stem}.json").write_text(json.dumps(issue_certificate(
-            wav_path, args.uid, "TEAM", "WaveTag-audio (Volto-based)", res.metrics), ensure_ascii=False, indent=2),
-            encoding="utf-8")
+        certificate_path = out / "certificates" / f"{f.stem}.json"
+        if res.passed:
+            certificate_path.write_text(json.dumps(issue_certificate(
+                wav_path, args.uid, "TEAM", "WaveTag-audio (Volto-based)", res.metrics),
+                ensure_ascii=False, indent=2), encoding="utf-8")
+        elif certificate_path.exists():
+            certificate_path.unlink()
         ref_embs = {n: e.embed(x[None])[0] for n, e in evals.items()}
         for an in names:
             try:
@@ -94,13 +98,23 @@ def main():
             for n, e in evals.items():
                 row[f"sim_{n}"] = float(cosine(e.embed(ya[None])[0], ref_embs[n])[0])
             d = detect_optout(ya, pipe.optout_cfg, 5, payload)
-            row.update(optout_ok=int(d["ok"]), optout_raw_ber=d["raw_ber"])
+            row.update(optout_ok=int(d["ok"] and d["payload"] == payload),
+                       optout_raw_ber=d["raw_ber"])
             if cfg.audio.wm_mode == "plus":
                 vp = cfg.audio.volto_plus
                 td = detect_volto_plus(ya, args.uid, sr, vp.slot_ms, vp.seed_base)
                 row["trigger_ratio"] = td["peak_ratio"]
                 row["trigger_detected"] = int(td["peak_ratio"] >= cfg.audio.trigger_detect.min_peak_ratio
-                                              and abs(td["loc_error"]) <= 16)
+                                              and abs(td["loc_error"])
+                                              <= cfg.audio.trigger_detect.max_loc_error_samples)
+            else:
+                from wavetag.audio.volto_star import star_detect
+
+                vs = cfg.audio.volto_star
+                score = star_detect(pipe.star_model, ya, args.uid, sr, int(vs.seg_sec * sr),
+                                    cfg.audio.volto_plus.slot_ms, cfg.audio.volto_plus.seed_base, device)
+                row["star_correlation"] = score
+                row["star_detected"] = int(score >= vs.min_correlation)
             rows.append(row)
 
     df = pd.DataFrame(rows)

@@ -3,7 +3,7 @@
  ① 화자 특정 신호 제거:   longitudinal(bisection) -> lateral(ACO)           [volto_removal.py]
  ② 사용자 식별 워터마크:  Volto+ (시간영역)  또는  Volto* (생성모델)           [volto_plus.py / volto_star.py]
  ③ 옵트아웃 코드:         고주파 DSSS + Reed-Solomon                          [optout_code.py]
- ④ 검증:                  화자유사도(aux) / PESQ / SNR 이 합격 기준을 만족하는가
+ ④ 검증:                  화자유사도 / PESQ / SNR / 워터마크 검출이 합격 기준을 만족하는가
  ④-재처리:                음질 미달 -> 보안강도 한 단계 낮춤 / 보호 미달 -> 한 단계 높임 (최대 max_retries 회)
 """
 from __future__ import annotations
@@ -16,8 +16,8 @@ import numpy as np
 from ..common.config import ns_to_dict
 from ..common.payload import pack_optout
 from .metrics import cosine, pesq_score, snr_db
-from .optout_code import AudioOptOutConfig, embed_optout
-from .volto_plus import apply_volto_plus
+from .optout_code import AudioOptOutConfig, detect_optout, embed_optout
+from .volto_plus import apply_volto_plus, detect_volto_plus
 from .volto_removal import RemovalConfig, lateral_crop_aco, longitudinal_crop
 
 
@@ -26,7 +26,7 @@ class ProtectResult:
     audio: np.ndarray
     passed: bool
     strength: str
-    metrics: Dict[str, float]
+    metrics: Dict[str, float | bool]
     info: Dict = field(default_factory=dict)
 
 
@@ -70,19 +70,55 @@ class WaveTagAudioPipeline:
 
         # ④ 검증
         pc = cfg.pass_criteria
+        expected_optout = pack_optout(uid)
+        optout_result = detect_optout(x4, self.optout_cfg, len(expected_optout), expected_optout)
         m = {
             "sim_aux": float(cosine(self.embed_fn(x4[None])[0], ref_emb)[0]),
             "pesq": pesq_score(x, x4, self.sr, pc.pesq_mode),
             "snr_db": snr_db(x, x4),
+            "optout_ok": bool(optout_result["ok"] and optout_result["payload"] == expected_optout),
         }
-        quality_ok = (np.isnan(m["pesq"]) or m["pesq"] >= pc.pesq_min) and m["snr_db"] >= pc.snr_min_db
-        protect_ok = m["sim_aux"] < pc.sim_max
+        if cfg.audio.wm_mode == "star":
+            from .volto_star import star_detect
+
+            star_correlation = star_detect(
+                self.star_model, x4, uid, self.sr,
+                int(cfg.audio.volto_star.seg_sec * self.sr),
+                vp.slot_ms, vp.seed_base, self.device,
+            )
+            m["star_correlation"] = float(star_correlation)
+            m["star_detected"] = bool(
+                star_correlation >= cfg.audio.volto_star.min_correlation
+            )
+            owner_watermark_ok = m["star_detected"]
+        else:
+            trigger_result = detect_volto_plus(
+                x4, uid, self.sr, vp.slot_ms, vp.seed_base
+            )
+            m["trigger_ratio"] = float(trigger_result["peak_ratio"])
+            m["trigger_loc_error"] = float(trigger_result["loc_error"])
+            m["trigger_detected"] = bool(
+                trigger_result["peak_ratio"] >= cfg.audio.trigger_detect.min_peak_ratio
+                and abs(trigger_result["loc_error"])
+                <= cfg.audio.trigger_detect.max_loc_error_samples
+            )
+            owner_watermark_ok = m["trigger_detected"]
+
+        watermark_ok = bool(owner_watermark_ok and m["optout_ok"])
+        m["watermark_ok"] = watermark_ok
+        quality_ok = (
+            np.isfinite(m["pesq"])
+            and m["pesq"] >= pc.pesq_min
+            and m["snr_db"] >= pc.snr_min_db
+        )
+        protect_ok = m["sim_aux"] < pc.sim_max and watermark_ok
         m["quality_ok"], m["protect_ok"] = bool(quality_ok), bool(protect_ok)
         return ProtectResult(x4, bool(quality_ok and protect_ok), strength, m,
                              {"longitudinal_t": t, "sim_after_lc": sim_lc, "aco": aco_info})
 
     # ---------------------------------------------------------------- 재처리 루프 (도면 ④-재처리)
     def protect(self, x: np.ndarray, uid: int, strength: str = "strong", max_retries: int = 2) -> ProtectResult:
+        """보호 성공 결과를 반환하고, 모든 시도가 실패하면 원본 오디오를 반환한다."""
         levels = list(self.cfg.strength_levels)
         idx = levels.index(strength)
         tried, best = set(), None
@@ -99,4 +135,10 @@ class WaveTagAudioPipeline:
             if nxt < 0 or nxt >= len(levels) or nxt in tried:
                 break
             idx = nxt
-        return best
+        return ProtectResult(
+            audio=x.copy(),
+            passed=False,
+            strength=best.strength,
+            metrics=best.metrics,
+            info={**best.info, "fallback": "original_audio"},
+        )
