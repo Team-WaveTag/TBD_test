@@ -4,7 +4,7 @@
   python scripts/run_audio_eval.py --data_dir data/audio --out_dir results/audio --n_files 5 --uid 1001
   python scripts/run_audio_eval.py --data_dir data/audio --attacks identity,mp3_128k,resample_8k --strength strong
 
-출력: results/audio/per_file.csv (파일×공격 단위 원자료), summary.csv (공격별 평균), protected/*.wav, certificates/*.json
+출력: results/audio/per_file.csv (파일×공격 단위 원자료), summary.csv (공격별 평균), protected/*.wav, 합격 파일의 certificates/*.json
 
 측정 항목(공격 적용 후 파일 기준)
   sim_<인코더>     : 원본과의 화자 유사도(낮을수록 보호 유지). eval 인코더는 생성에 쓰지 않은 모델 -> 블랙박스
@@ -77,9 +77,13 @@ def main():
         wav_path = out / "protected" / f"{f.stem}_wavetag.wav"
         save_audio(wav_path, res.audio, sr)
         y = load_audio(wav_path, sr)
-        (out / "certificates" / f"{f.stem}.json").write_text(json.dumps(issue_certificate(
-            wav_path, args.uid, "TEAM", "WaveTag-audio (Volto-based)", res.metrics), ensure_ascii=False, indent=2),
-            encoding="utf-8")
+        certificate_path = out / "certificates" / f"{f.stem}.json"
+        if res.passed:
+            certificate_path.write_text(json.dumps(issue_certificate(
+                wav_path, args.uid, "TEAM", "WaveTag-audio (Volto-based)", res.metrics),
+                ensure_ascii=False, indent=2), encoding="utf-8")
+        elif certificate_path.exists():
+            certificate_path.unlink()
         ref_embs = {n: e.embed(x[None])[0] for n, e in evals.items()}
         for an in names:
             try:
